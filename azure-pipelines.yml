@@ -1,33 +1,97 @@
-# Python package
-# Create and test a Python package on multiple Python versions.
-# Add steps that analyze code, save the dist with the build record, publish to a PyPI-compatible index, and more:
-# https://docs.microsoft.com/azure/devops/pipelines/languages/python
+# manual triger
+trigger: none
 
-trigger:
-- main
+variables:
+  - name: AZURE_SUBSCRIPTION
+    value: 'sym-cloudplatform-dev'
+  - name: FUNCTION_APP_NAME
+    value: 'azfunc-application-functions-dev'
 
 pool:
-  vmImage: ubuntu-latest
-strategy:
-  matrix:
-   
-   
-    Python37:
-      python.version: '3.x'
+  vmImage: 'ubuntu-latest'
 
+jobs:
+  - job: Build
+    displayName: Build
+    steps:
+      - task: NodeTool@0
+        displayName: 'Install Node.js'
+        inputs:
+          versionSpec: '18.x'
 
-steps:
-- task: UsePythonVersion@0
-  inputs:
-    versionSpec: '$(python.version)'
-  displayName: 'Use Python $(python.version)'
+      - task: CopyFiles@2
+        inputs:
+          Contents: '.npmrc'
+          TargetFolder: '$(agent.tempdirectory)'
 
-- script: |
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-  displayName: 'Install dependencies'
+      - task: npmAuthenticate@0
+        inputs:
+          workingFile: $(agent.tempdirectory)/.npmrc
 
-- script: |
-    pip install pytest pytest-azurepipelines
-    pytest
-  displayName: 'pytest'
+      - task: npmAuthenticate@0
+        inputs:
+          workingFile: '.npmrc'
+
+      - script: |
+          yarn install
+        displayName: "install packages"
+
+      - script: |
+          yarn run build
+        displayName: 'Build'
+
+      - task: SonarCloudPrepare@1
+        condition: and(ne(variables['Build.Reason'], 'Schedule'),or( eq(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/main')))
+        inputs:
+          SonarCloud: 'Sonarcloud Autodiscover Projects'
+          organization: 'symmedia'
+          scannerMode: 'CLI'
+          configMode: 'file'
+          extraProperties: |
+            sonar.projectKey=georgfischer_$(Build.Repository.Name)
+            sonar.projectName=$(Build.Repository.Name)
+
+      - task: SonarCloudAnalyze@1
+        condition: and(ne(variables['Build.Reason'], 'Schedule'),or( eq(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/main')))
+
+      - task: SonarCloudPublish@1
+        condition: and(ne(variables['Build.Reason'], 'Schedule'),or( eq(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/main')))
+        inputs:
+          pollingTimeoutSec: '300'
+
+#      - task: WhiteSource@21
+#        displayName: 'Run WhiteSourde analysis'
+#        condition: and( succeeded(), ne(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranchName'], 'main'))
+#        inputs:
+#          cwd: '$(Build.SourcesDirectory)'
+#          projectName: $(Build.DefinitionName)    
+
+      - task: ArchiveFiles@2
+        displayName: 'Archive files'
+        inputs:
+          rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
+          includeRootFolder: false
+          archiveType: zip
+          archiveFile: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+          replaceExistingArchive: true
+
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+          artifactName: azure-function-package
+
+  - job: DeployIfMain
+    displayName: Deploy if Main Branch or Forced
+    dependsOn: Build
+    condition: succeeded()
+    steps:
+      - download: current
+        artifact: azure-function-package
+      - task: AzureFunctionApp@1
+        displayName: 'Azure Functions App Deploy: $(FUNCTION_APP_NAME)'
+        inputs:
+          azureSubscription: '$(AZURE_SUBSCRIPTION)'
+          appName: $(FUNCTION_APP_NAME)
+          appType: 'functionApp'
+          package: '$(Pipeline.Workspace)/azure-function-package/*.zip'
+          deploymentMethod: 'auto'
